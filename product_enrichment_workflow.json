@@ -1,0 +1,706 @@
+{
+  "name": "Product Launch AI Agent",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "0965a6ae-5fd4-470b-8af1-3b264a7506aa",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "read",
+        "documentId": "={{$env.GOOGLE_SHEET_ID}}",
+        "sheetName": "New_Products",
+        "range": "A:Z",
+        "firstRowAsHeader": true
+      },
+      "id": "50b57c90-1226-4770-be35-dfe34389c7c2",
+      "name": "Read New Products",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 3,
+      "position": [
+        250,
+        0
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "name": "GoogleSheets_Products"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{$json[\"title\"]}}",
+              "operation": "notEmpty"
+            },
+            {
+              "value1": "={{$json[\"source_url\"]}}",
+              "operation": "notEmpty"
+            }
+          ]
+        }
+      },
+      "id": "0b2616df-f34f-49e3-b6c5-02e6fdf73b54",
+      "name": "Has Required Fields?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "language": "JavaScript",
+        "functionCode": "\nconst crypto = require('crypto');\nconst title = $json.title;\nconst vendor = $json.vendor;\nlet handle = $json.handle;\nif (!handle) {\n  handle = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');\n}\nconst fingerprint = crypto.createHash('sha1').update(`${vendor}|${title}|${handle}`).digest('hex');\nreturn { ...$json, handle, fingerprint, sheet_row_json: { ...$json } };\n"
+      },
+      "id": "1ff4fe42-6600-496c-a92c-b26adb59904d",
+      "name": "Prepare Fingerprint",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        750,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "\nCREATE TABLE IF NOT EXISTS product_enrichment_log (\n  id SERIAL PRIMARY KEY,\n  timestamp_utc TIMESTAMPTZ DEFAULT NOW(),\n  fingerprint TEXT,\n  sheet_row_json JSONB,\n  source_url TEXT,\n  search_context_json JSONB,\n  llm_input_hash TEXT,\n  llm_output_json JSONB,\n  shopify_request_json JSONB,\n  shopify_response_json JSONB,\n  status TEXT,\n  error_message TEXT\n);\nCREATE INDEX IF NOT EXISTS product_enrichment_log_fingerprint_idx ON product_enrichment_log (fingerprint);\nCREATE INDEX IF NOT EXISTS product_enrichment_log_timestamp_idx ON product_enrichment_log (timestamp_utc);\nSELECT '{{$json.title}}'::text AS title,\n       '{{$json.vendor}}'::text AS vendor,\n       '{{$json.handle}}'::text AS handle,\n       '{{$json.source_url}}'::text AS source_url,\n       '{{$json.image_url}}'::text AS image_url,\n       '{{$json.collection}}'::text AS collection,\n       {{$json.price || 0}}::numeric AS price,\n       {{$json.compare_at_price || 0}}::numeric AS compare_at_price,\n       '{{$json.fingerprint}}'::text AS fingerprint,\n       EXISTS(SELECT 1 FROM product_enrichment_log WHERE fingerprint='{{$json.fingerprint}}' AND status IN ('created','already_exists')) AS exists;\n"
+      },
+      "id": "f1f7a7d6-0d3e-408f-b36f-ff6f5a405d98",
+      "name": "Check Fingerprint",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        1000,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "name": "Postgres_Main"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.exists}}",
+              "operation": "equals",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "b4fb64a9-12d3-4aa4-87cd-a7a4a70a4db7",
+      "name": "Already Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1250,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "language": "JavaScript",
+        "functionCode": "\nreturn {\n  fingerprint: $json.fingerprint,\n  sheet_row_json: $json.sheet_row_json,\n  source_url: $json.source_url,\n  status: 'already_exists'\n};\n"
+      },
+      "id": "ade9d4b0-0777-4780-ae9d-fbc90ed2ee75",
+      "name": "Prepare Already Exists Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1500,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "product_enrichment_log",
+        "columns": "fingerprint,sheet_row_json,source_url,status"
+      },
+      "id": "51337691-8679-4219-b965-51e99a154c05",
+      "name": "Log Already Exists",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        1700,
+        -200
+      ],
+      "credentials": {
+        "postgres": {
+          "name": "Postgres_Main"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{$json.source_url}}",
+        "responseFormat": "string"
+      },
+      "id": "90829bbb-5af3-4c2b-9d47-125f47a59c4e",
+      "name": "Fetch Source URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        1500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "mergeByIndex"
+      },
+      "id": "7309ae92-a2c4-4173-b632-bd703bcefacd",
+      "name": "Merge Page",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 2,
+      "position": [
+        1750,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "language": "JavaScript",
+        "functionCode": "\nconst crypto = require('crypto');\nconst promptObj = {\n  sheet: $json.sheet_row_json,\n  page_content: $json.data\n};\nconst llm_prompt = JSON.stringify(promptObj);\nconst llm_input_hash = crypto.createHash('sha1').update(llm_prompt).digest('hex');\nreturn { ...$json, llm_prompt, llm_input_hash };\n"
+      },
+      "id": "782bad2e-9d94-4e77-abfe-516071ced5c2",
+      "name": "Prepare LLM Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "chat",
+        "model": "gpt-4o-mini",
+        "messages": [
+          {
+            "role": "system",
+            "content": "You are a meticulous ecommerce product data analyst. Extract facts ONLY from provided content. If unsure, return null."
+          },
+          {
+            "role": "user",
+            "content": "={{$json.llm_prompt}}"
+          }
+        ],
+        "responseFormat": "json"
+      },
+      "id": "dad802ac-c82c-48cc-bea6-6fa550bf698d",
+      "name": "LLM Enrichment",
+      "type": "n8n-nodes-base.openAi",
+      "typeVersion": 1,
+      "position": [
+        2250,
+        0
+      ],
+      "credentials": {
+        "openAiApi": {
+          "name": "OpenAI_Main"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "JavaScript",
+        "functionCode": "\nconst crypto = require('crypto');\nconst data = JSON.parse($json.data);\nlet { description_long, color_name, materials, care_instructions, fit_notes, sku, tags, options } = data;\nconst cleanTags = Array.from(new Set((tags || '').split(',').map(t => t.trim().toLowerCase()))).filter(Boolean).slice(0,10).join(',');\nconst title = ($json.title || '').substring(0,255);\nlet handle = $json.handle;\nlet finalSku = sku;\nif (!finalSku) {\n  const date = new Date().toISOString().slice(0,10).replace(/-/g,'');\n  const hash = crypto.createHash('sha1').update(`${$json.vendor}|${handle}`).digest('hex').slice(0,5).toUpperCase();\n  finalSku = `${$json.vendor}-${handle}-${date}-${hash}`.toUpperCase();\n}\nconst body_html = description_long ? `<p>${description_long}</p>` : '';\nconst short_description_html = description_long ? `<p>${description_long.split('.').slice(0,2).join('.')}.</p>` : '';\nconst missingCritical = !(title && body_html && finalSku);\nconst shopify_payload = {\n  title,\n  body_html,\n  vendor: $json.vendor,\n  handle,\n  tags: cleanTags,\n  options: options || [],\n  variants: [\n    {\n      price: $json.price || null,\n      compare_at_price: $json.compare_at_price || null,\n      sku: finalSku\n    }\n  ],\n  images: $json.image_url ? [{ src: $json.image_url }] : []\n};\nreturn {\n  ...$json,\n  title,\n  description_long,\n  color_name,\n  materials,\n  care_instructions,\n  fit_notes,\n  sku: finalSku,\n  tags: cleanTags,\n  options,\n  short_description_html,\n  body_html,\n  llm_output_json: data,\n  shopify_payload,\n  missingCritical\n};\n"
+      },
+      "id": "faee71af-239e-4c2d-bff7-2c5cc65b3604",
+      "name": "Validate & Format",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2500,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$json.missingCritical}}",
+              "operation": "equals",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "ba65ab0b-130c-42cc-9ca9-f66b43c71ef8",
+      "name": "Missing Critical?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2750,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "language": "JavaScript",
+        "functionCode": "\nreturn {\n  fingerprint: $json.fingerprint,\n  sheet_row_json: $json.sheet_row_json,\n  source_url: $json.source_url,\n  llm_input_hash: $json.llm_input_hash,\n  llm_output_json: $json.llm_output_json,\n  shopify_request_json: $json.shopify_payload,\n  shopify_response_json: null,\n  status: 'skipped',\n  error_message: 'Missing critical fields'\n};\n"
+      },
+      "id": "d3182c5e-7130-4fed-914e-d83bd7958748",
+      "name": "Prepare Skip Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3000,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "product_enrichment_log",
+        "columns": "fingerprint,sheet_row_json,source_url,llm_input_hash,llm_output_json,shopify_request_json,shopify_response_json,status,error_message"
+      },
+      "id": "cbe225c7-6c12-4c12-9003-eba562b7b40c",
+      "name": "Log Skipped",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        3200,
+        -200
+      ],
+      "credentials": {
+        "postgres": {
+          "name": "Postgres_Main"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{$env.DRY_RUN === \"true\"}}",
+              "operation": "equals",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "8221a30a-61e8-4ed6-8aae-a52f2891cf87",
+      "name": "Dry Run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        3000,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "language": "JavaScript",
+        "functionCode": "\nreturn {\n  fingerprint: $json.fingerprint,\n  sheet_row_json: $json.sheet_row_json,\n  source_url: $json.source_url,\n  llm_input_hash: $json.llm_input_hash,\n  llm_output_json: $json.llm_output_json,\n  shopify_request_json: $json.shopify_payload,\n  shopify_response_json: null,\n  status: 'skipped',\n  error_message: 'dry_run'\n};\n"
+      },
+      "id": "1cf172e2-33d3-4f53-b1d6-c606c887e7a9",
+      "name": "Prepare Dry Run Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3250,
+        -100
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "product_enrichment_log",
+        "columns": "fingerprint,sheet_row_json,source_url,llm_input_hash,llm_output_json,shopify_request_json,shopify_response_json,status,error_message"
+      },
+      "id": "43b6cc1e-a1c7-4afa-bfdd-93214c374684",
+      "name": "Log Dry Run",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        3450,
+        -100
+      ],
+      "credentials": {
+        "postgres": {
+          "name": "Postgres_Main"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "product",
+        "operation": "create",
+        "additionalFields": {},
+        "fields": {
+          "title": "={{$json.shopify_payload.title}}",
+          "body_html": "={{$json.shopify_payload.body_html}}",
+          "vendor": "={{$json.shopify_payload.vendor}}",
+          "handle": "={{$json.shopify_payload.handle}}",
+          "tags": "={{$json.shopify_payload.tags}}",
+          "options": "={{$json.shopify_payload.options}}",
+          "variants": "={{$json.shopify_payload.variants}}",
+          "images": "={{$json.shopify_payload.images}}"
+        }
+      },
+      "id": "6fe4cbb5-5f79-452d-b9cf-f3fc5d59e2fd",
+      "name": "Create Product in Shopify",
+      "type": "n8n-nodes-base.shopify",
+      "typeVersion": 1,
+      "position": [
+        3250,
+        0
+      ],
+      "credentials": {
+        "shopifyApi": {
+          "name": "Shopify_Store"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "JavaScript",
+        "functionCode": "\nreturn {\n  fingerprint: $json.fingerprint,\n  sheet_row_json: $json.sheet_row_json,\n  source_url: $json.source_url,\n  llm_input_hash: $json.llm_input_hash,\n  llm_output_json: $json.llm_output_json,\n  shopify_request_json: $json.shopify_payload,\n  shopify_response_json: $json,\n  status: 'created',\n  error_message: null\n};\n"
+      },
+      "id": "bdecad1c-fd95-4cd6-ab3d-24730dc23847",
+      "name": "Prepare Created Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3450,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "product_enrichment_log",
+        "columns": "fingerprint,sheet_row_json,source_url,llm_input_hash,llm_output_json,shopify_request_json,shopify_response_json,status,error_message"
+      },
+      "id": "db0faace-cfa6-40ef-84de-7bf2c25311f7",
+      "name": "Log Created",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        3650,
+        0
+      ],
+      "credentials": {
+        "postgres": {
+          "name": "Postgres_Main"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "ec56c778-0681-492b-b3d7-4a4be7a010db",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "language": "JavaScript",
+        "functionCode": "\nreturn {\n  fingerprint: $json.fingerprint || null,\n  sheet_row_json: $json.sheet_row_json || null,\n  source_url: $json.source_url || null,\n  llm_input_hash: $json.llm_input_hash || null,\n  llm_output_json: $json.llm_output_json || null,\n  shopify_request_json: $json.shopify_payload || null,\n  shopify_response_json: null,\n  status: 'error',\n  error_message: $json.message\n};\n"
+      },
+      "id": "f04ea078-8a5e-45af-9d25-1e4feff6afc1",
+      "name": "Prepare Error Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        250,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "table": "product_enrichment_log",
+        "columns": "fingerprint,sheet_row_json,source_url,llm_input_hash,llm_output_json,shopify_request_json,shopify_response_json,status,error_message"
+      },
+      "id": "75ad9d1d-5cf2-46f2-a65e-3a4bb4994d2d",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 1,
+      "position": [
+        500,
+        -300
+      ],
+      "credentials": {
+        "postgres": {
+          "name": "Postgres_Main"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Read New Products",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read New Products": {
+      "main": [
+        [
+          {
+            "node": "Has Required Fields?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Required Fields?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Fingerprint",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Prepare Fingerprint": {
+      "main": [
+        [
+          {
+            "node": "Check Fingerprint",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Fingerprint": {
+      "main": [
+        [
+          {
+            "node": "Already Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Already Exists?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Already Exists Log",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Fetch Source URL",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Already Exists Log": {
+      "main": [
+        [
+          {
+            "node": "Log Already Exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Source URL": {
+      "main": [
+        [
+          {
+            "node": "Merge Page",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Page": {
+      "main": [
+        [
+          {
+            "node": "Prepare LLM Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare LLM Prompt": {
+      "main": [
+        [
+          {
+            "node": "LLM Enrichment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "LLM Enrichment": {
+      "main": [
+        [
+          {
+            "node": "Validate & Format",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate & Format": {
+      "main": [
+        [
+          {
+            "node": "Missing Critical?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Missing Critical?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Skip Log",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Dry Run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Skip Log": {
+      "main": [
+        [
+          {
+            "node": "Log Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Dry Run?": {
+      "main": [
+        [
+          {
+            "node": "Prepare Dry Run Log",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Product in Shopify",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Dry Run Log": {
+      "main": [
+        [
+          {
+            "node": "Log Dry Run",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Product in Shopify": {
+      "main": [
+        [
+          {
+            "node": "Prepare Created Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Created Log": {
+      "main": [
+        [
+          {
+            "node": "Log Created",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Error Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Error Log": {
+      "main": [
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "id": "2d90bb67-0cd0-4251-aa05-566467cadda2"
+}
